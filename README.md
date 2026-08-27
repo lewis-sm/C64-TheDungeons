@@ -1,6 +1,6 @@
 The Dungeons was one of the earliest computer games I ever played on the Commodore 64 back int the 1980's. I may have played the earlier version on the Commodore VIC-20 as well at some point; as I played a lot of Dungeons & Dragons back then so the game really appealed to the younger me.
 
-The source code in this repository is a deconstructed version of the game from a PRG file into its major component parts allowing it to be re-built using the code and the Visual Studio Code extension VS64 in conjuction with the ACME assembler.  It also contains some useful background material about the game gathered from a variety of sources across the internet.
+The source code in this repository is a deconstructed version of the game from a PRG file into its major component parts allowing it to be re-built using the code and the Visual Studio Code extension VS64 in conjunction with the ACME assembler.  It also contains some useful background material about the game gathered from a variety of sources across the internet.
 
 Disclaimer:  I have used AI (Claude and CoPilot) to help with some of the tricker pieces of getting this fully working, but the core BASIC game code and assets all remain untouched from the origional game.
 
