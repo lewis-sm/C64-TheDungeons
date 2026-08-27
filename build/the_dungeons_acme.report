@@ -1,0 +1,607 @@
+
+; ******** Source: u:\Programming\c64\assembler\the_dungeons_acme\src\the_dungeons.asm
+     1                          ; ============================================================
+     2                          ; the_dungeons.asm
+     3                          ; Top-level build - assembles the reconstructed decompressed
+     4                          ; image directly (no depacker needed; this IS the runtime data).
+     5                          ;
+     6                          ; NOTE: each include file assembles at its own * = address, with
+     7                          ; two small unavoidable gaps between them that your build/linker
+     8                          ; step needs to zero-pad when producing the final flat PRG:
+     9                          ;   $083F-$0840  dead space before the sprite pool (sprite VIC
+    10                          ;                block numbers are hardcoded in basic_program, so
+    11                          ;                the pool can't move - see Tier 3 scope doc)
+    12                          ;   $1201-$1220  8 unidentified filler bytes before ml_saveload
+    13                          ; Everything else is back-to-back with no gaps, including
+    14                          ; game_state.asm -> basic_program.asm -> leftover_items.asm ->
+    15                          ; ml_entry.asm (the C7 padding that used to precede ml_entry at
+    16                          ; $6500 was trimmed - it now sits at $646C, see include/README.md).
+    17                          ; ============================================================
+    18                          
+
+; ******** Source: \src\include\constants.asm
+     1                          ; ============================================================
+     2                          ; constants.asm
+     3                          ; The Dungeons (Brian & Marian Clark, 1983) - reconstruction
+     4                          ; Confirmed labels/addresses from decompressed-image analysis
+     5                          ; ============================================================
+     6                          
+     7                          ; --- BASIC zero page (used by the ML entry stub at $6500) ---
+     8                          TXTTAB_LO   = $2B      ; start-of-BASIC-program pointer, low byte
+     9                          TXTTAB_HI   = $2C      ; start-of-BASIC-program pointer, high byte
+    10                          VARTAB_LO   = $2D      ; start-of-variables pointer, low byte
+    11                          VARTAB_HI   = $2E      ; start-of-variables pointer, high byte
+    12                          ARYTAB_LO   = $2F      ; start-of-arrays pointer, low byte
+    13                          ARYTAB_HI   = $30      ; start-of-arrays pointer, high byte
+    14                          STREND_LO   = $31      ; end-of-arrays/string-storage pointer, low byte
+    15                          STREND_HI   = $32      ; end-of-arrays/string-storage pointer, high byte
+    16                          
+    17                          ; --- BASIC ROM entry points used by the ML entry stub ---
+    18                          ; (Standard C64 BASIC V2 ROM addresses - real ROM required to run)
+    19                          BASIC_LINKPRG = $A660  ; relink BASIC program line pointers
+    20                          BASIC_CLR     = $A68E  ; clear variables / reset stack (CLR-equivalent)
+    21                          BASIC_MAIN    = $A7AE  ; main statement-execution dispatcher (GONE/warm start)
+    22                          
+    23                          ; --- KERNAL vectors used by the save/load routine ($1218-$125F) ---
+    24                          KERNAL_SETLFS = $FFBA
+    25                          KERNAL_SETNAM = $FFBD
+    26                          KERNAL_LOAD   = $FFD5
+    27                          KERNAL_SAVE   = $FFD8
+    28                          
+    29                          ; --- Save-state block used by SYS4640 (save) / SYS4676 (load) ---
+    30                          ; Filename buffer + save-state block, built by BASIC lines 710-712 / 1140-1142
+    31                          NAME_BUFFER   = $1C00  ; "DATA1" filename text lives here (5 bytes)
+    32                          SAVESTATE_LO  = $1C00  ; save/load range low byte
+    33                          SAVESTATE_HI  = $2000  ; save/load range high byte (exclusive)
+    34                          
+    35                          ; --- Game-state sub-arrays within the save-state block ---
+    36                          ; Computed at runtime by BASIC line 243: D=30*256:R=D-99:TR=R-18:Q=18:T=TR-100:MS=T-100
+    37                          ; SR computed by line 167/266: SR=MS-30
+    38                          SR_PTR        = $1CA5  ; save/restore pointer block (~30 bytes)
+    39                          MS_ARRAY      = $1CC3  ; monster status per room (~100 bytes)
+    40                          T_ARRAY       = $1D27  ; trap flags per room (~100 bytes)
+    41                          TR_ARRAY      = $1D8B  ; target-room scratch (18 bytes), zeroed at game start
+    42                          R_ARRAY       = $1D9D  ; room-connection data (99 bytes), re-read from DATA
+    43                                                  ; statements every game start (BASIC line 1064) -
+    44                                                  ; does NOT need to be byte-exact in the image.
+    45                          D_ARRAY       = $1E00  ; THE DUNGEON EXIT MATRIX. Indexed as
+    46                                                  ; PEEK(D+room*4+direction) - BASIC lines 161/163.
+    47                                                  ; Never written by the BASIC program itself, so
+    48                                                  ; MUST be present as static data at load time.
+    49                          
+    50                          ; --- Game entry / layout (decompressed image addresses) ---
+    51                          SPRITE_POOL_START   = $0840   ; 36 sprite blocks (#33-68), 64 bytes each
+    52                          SPRITE_POOL_END     = $1140
+    53                          WALL_TILES_START    = $1140   ; custom wall/gate tile bitmaps
+    54                          ML_SAVELOAD_START   = $1218   ; tape SAVE/LOAD subroutines
+    55                          LOOKUP_TABLE_START  = $1260   ; unresolved lookup/translation table
+    56                          CHARSET_COPY_START  = $1400   ; standard C64 charset copied to RAM
+    57                          BASIC_PROGRAM_START = $2001   ; main game program (476 lines)
+    58                          BASIC_PROGRAM_END   = $6271   ; corrected - was $6269 (8 bytes short of the
+    59                                                         ; true end-of-program null terminator; see
+    60                                                         ; include/README.md "Tokenizer fixes")
+    61                          LEFTOVER_ITEMS_START = $6271  ; unused item data (DAGGER, HELMET, etc.)
+    62                          LEFTOVER_ITEMS_END   = $646C  ; kept for historical/future reference
+    63                          ML_ENTRY_STUB_START = $646C   ; hands off build -> BASIC RUN
+    64                                                         ; (trimmed: originally $6500 in the source
+    65                                                         ;  image with 147 bytes of $C7 padding
+    66                                                         ;  before it; nothing hardcodes $6500, so
+    67                                                         ;  the stub now sits right after the
+    68                                                         ;  leftover item data with no gap)
+    69                          
+    70                          ; --- VIC-II / hardware bases referenced by the BASIC program ---
+    71                          VIC_BASE      = $D000  ; "VS" in BASIC source
+    72                          SPRITE_PTRS   = $07F8  ; sprite pointer table (2040-2047 decimal)
+    73                          SCREEN_BASE   = $0400  ; "SC" in BASIC source
+    74                          COLOR_RAM     = $D800  ; "C" in BASIC source
+
+; ******** Source: u:\Programming\c64\assembler\the_dungeons_acme\src\the_dungeons.asm
+    20                          
+    21                                  * = $0801
+    22                          autorun_stub:
+    23                                  ; "10 SYS25708"  (was SYS25856 - trimmed 147 bytes of $C7
+    24                                  ; padding by relocating ml_entry from $6500 to $646C)
+    25  0801 0c08                       !byte $0C, $08          ; link -> $080C
+    26  0803 0a00                       !byte $0A, $00          ; line 10
+    27  0805 9e                         !byte $9E               ; SYS token
+    28  0806 3235373038                 !text "25708"
+    29  080b 00                         !byte $00               ; end of statement
+    30  080c 0000                       !byte $00, $00          ; end of program (null link)
+    31                          
+    32                          ; Change to the sprite_defs works but are they out of sequence???
+    33                          ;!source "/src/include/sprite_defs.asm"
+
+; ******** Source: \src\include\sprites.asm
+     1                          ; ============================================================
+     2                          ; sprites.asm
+     3                          ; Sprite data pool - 36 blocks (VIC sprite pointers #33-68),
+     4                          ; 64 bytes each (63 bytes of pixel data + 1 unused byte).
+     5                          ; Source: decompressed image $0840-$1140.
+     6                          ; Confirmed by rendering (see reference/sprite_sheet.png):
+     7                          ; monster and player sprites matching the M$/MN DATA tables
+     8                          ; in the BASIC source (spider, centipede, worm, dragon, etc).
+     9                          ; Blocks 33-63 are pointed to directly via POKE 2040..2047.
+    10                          ; Blocks 64-68 are unused "template" frames copied into the
+    11                          ; active 60-63 slots at runtime for animation.
+    12                          ; ============================================================
+    13                          
+    14                                  * = $0840
+    15                          
+    16                          sprite_pool:
+    17  0840 0000000000000000...        !binary "/src/include/sprites_0840.bin"
+    18                          
+    19                          ; Individual block labels (block N = sprite_pool + (N-33)*64)
+    20                          sprite_33 = sprite_pool + 0*64
+    21                          sprite_34 = sprite_pool + 1*64
+    22                          sprite_35 = sprite_pool + 2*64
+    23                          sprite_36 = sprite_pool + 3*64
+    24                          sprite_37 = sprite_pool + 4*64
+    25                          sprite_38 = sprite_pool + 5*64
+    26                          sprite_39 = sprite_pool + 6*64
+    27                          sprite_40 = sprite_pool + 7*64
+    28                          sprite_41 = sprite_pool + 8*64
+    29                          sprite_42 = sprite_pool + 9*64
+    30                          sprite_43 = sprite_pool + 10*64
+    31                          sprite_44 = sprite_pool + 11*64
+    32                          sprite_45 = sprite_pool + 12*64
+    33                          sprite_46 = sprite_pool + 13*64
+    34                          sprite_47 = sprite_pool + 14*64
+    35                          sprite_48 = sprite_pool + 15*64
+    36                          sprite_49 = sprite_pool + 16*64
+    37                          sprite_50 = sprite_pool + 17*64
+    38                          sprite_51 = sprite_pool + 18*64
+    39                          sprite_52 = sprite_pool + 19*64
+    40                          sprite_53 = sprite_pool + 20*64
+    41                          sprite_54 = sprite_pool + 21*64
+    42                          sprite_55 = sprite_pool + 22*64
+    43                          sprite_56 = sprite_pool + 23*64
+    44                          sprite_57 = sprite_pool + 24*64
+    45                          sprite_58 = sprite_pool + 25*64
+    46                          sprite_59 = sprite_pool + 26*64
+    47                          sprite_60 = sprite_pool + 27*64   ; active animation slot
+    48                          sprite_61 = sprite_pool + 28*64   ; active animation slot
+    49                          sprite_62 = sprite_pool + 29*64   ; active animation slot
+    50                          sprite_63 = sprite_pool + 30*64   ; active animation slot
+    51                          sprite_64 = sprite_pool + 31*64   ; animation template
+    52                          sprite_65 = sprite_pool + 32*64   ; animation template
+    53                          sprite_66 = sprite_pool + 33*64   ; animation template
+    54                          sprite_67 = sprite_pool + 34*64   ; animation template
+    55                          sprite_68 = sprite_pool + 35*64   ; animation template
+    56                          
+    57                          sprite_pool_end:
+
+; ******** Source: u:\Programming\c64\assembler\the_dungeons_acme\src\the_dungeons.asm
+
+; ******** Source: \src\include\wall_tiles.asm
+     1                          ; ============================================================
+     2                          ; wall_tiles.asm
+     3                          ; Custom character tile bitmaps (wall/gate/bars decoration).
+     4                          ; Source: decompressed image $1140-$1201.
+     5                          ; Structurally confirmed (alternating bit patterns consistent
+     6                          ; with 8x8 character bitmaps); exact in-game usage/semantics
+     7                          ; not yet fully traced back to specific BASIC POKE calls.
+     8                          ; ============================================================
+     9                          
+    10                                  * = $1140
+    11                          
+    12                          wall_tiles:
+    13  1140 202020202000ff00...        !binary "/src/include/wall_tiles_1140.bin"
+    14                          
+    15                          wall_tiles_end:
+
+; ******** Source: u:\Programming\c64\assembler\the_dungeons_acme\src\the_dungeons.asm
+
+; ******** Source: \src\include\ml_saveload.asm
+     1                          ; ============================================================
+     2                          ; ml_saveload.asm
+     3                          ; Tape SAVE/LOAD routine for the "quit and save data" feature.
+     4                          ; Source: decompressed image $1220-$125F
+     5                          ; Called from BASIC via:
+     6                          ;   SYS4640  ($1220)  -> save game state to tape as "DATA1"
+     7                          ;   SYS4676  ($1244)  -> load game state from tape "DATA1"
+     8                          ; Confirmed via KERNAL vector calls (SETLFS/SETNAM/SAVE/LOAD).
+     9                          ; ============================================================
+    10                          
+
+; ******** Source: \src\include\constants.asm
+     1                          ; ============================================================
+     2                          ; constants.asm
+     3                          ; The Dungeons (Brian & Marian Clark, 1983) - reconstruction
+     4                          ; Confirmed labels/addresses from decompressed-image analysis
+     5                          ; ============================================================
+     6                          
+     7                          ; --- BASIC zero page (used by the ML entry stub at $6500) ---
+     8                          TXTTAB_LO   = $2B      ; start-of-BASIC-program pointer, low byte
+     9                          TXTTAB_HI   = $2C      ; start-of-BASIC-program pointer, high byte
+    10                          VARTAB_LO   = $2D      ; start-of-variables pointer, low byte
+    11                          VARTAB_HI   = $2E      ; start-of-variables pointer, high byte
+    12                          ARYTAB_LO   = $2F      ; start-of-arrays pointer, low byte
+    13                          ARYTAB_HI   = $30      ; start-of-arrays pointer, high byte
+    14                          STREND_LO   = $31      ; end-of-arrays/string-storage pointer, low byte
+    15                          STREND_HI   = $32      ; end-of-arrays/string-storage pointer, high byte
+    16                          
+    17                          ; --- BASIC ROM entry points used by the ML entry stub ---
+    18                          ; (Standard C64 BASIC V2 ROM addresses - real ROM required to run)
+    19                          BASIC_LINKPRG = $A660  ; relink BASIC program line pointers
+    20                          BASIC_CLR     = $A68E  ; clear variables / reset stack (CLR-equivalent)
+    21                          BASIC_MAIN    = $A7AE  ; main statement-execution dispatcher (GONE/warm start)
+    22                          
+    23                          ; --- KERNAL vectors used by the save/load routine ($1218-$125F) ---
+    24                          KERNAL_SETLFS = $FFBA
+    25                          KERNAL_SETNAM = $FFBD
+    26                          KERNAL_LOAD   = $FFD5
+    27                          KERNAL_SAVE   = $FFD8
+    28                          
+    29                          ; --- Save-state block used by SYS4640 (save) / SYS4676 (load) ---
+    30                          ; Filename buffer + save-state block, built by BASIC lines 710-712 / 1140-1142
+    31                          NAME_BUFFER   = $1C00  ; "DATA1" filename text lives here (5 bytes)
+    32                          SAVESTATE_LO  = $1C00  ; save/load range low byte
+    33                          SAVESTATE_HI  = $2000  ; save/load range high byte (exclusive)
+    34                          
+    35                          ; --- Game-state sub-arrays within the save-state block ---
+    36                          ; Computed at runtime by BASIC line 243: D=30*256:R=D-99:TR=R-18:Q=18:T=TR-100:MS=T-100
+    37                          ; SR computed by line 167/266: SR=MS-30
+    38                          SR_PTR        = $1CA5  ; save/restore pointer block (~30 bytes)
+    39                          MS_ARRAY      = $1CC3  ; monster status per room (~100 bytes)
+    40                          T_ARRAY       = $1D27  ; trap flags per room (~100 bytes)
+    41                          TR_ARRAY      = $1D8B  ; target-room scratch (18 bytes), zeroed at game start
+    42                          R_ARRAY       = $1D9D  ; room-connection data (99 bytes), re-read from DATA
+    43                                                  ; statements every game start (BASIC line 1064) -
+    44                                                  ; does NOT need to be byte-exact in the image.
+    45                          D_ARRAY       = $1E00  ; THE DUNGEON EXIT MATRIX. Indexed as
+    46                                                  ; PEEK(D+room*4+direction) - BASIC lines 161/163.
+    47                                                  ; Never written by the BASIC program itself, so
+    48                                                  ; MUST be present as static data at load time.
+    49                          
+    50                          ; --- Game entry / layout (decompressed image addresses) ---
+    51                          SPRITE_POOL_START   = $0840   ; 36 sprite blocks (#33-68), 64 bytes each
+    52                          SPRITE_POOL_END     = $1140
+    53                          WALL_TILES_START    = $1140   ; custom wall/gate tile bitmaps
+    54                          ML_SAVELOAD_START   = $1218   ; tape SAVE/LOAD subroutines
+    55                          LOOKUP_TABLE_START  = $1260   ; unresolved lookup/translation table
+    56                          CHARSET_COPY_START  = $1400   ; standard C64 charset copied to RAM
+    57                          BASIC_PROGRAM_START = $2001   ; main game program (476 lines)
+    58                          BASIC_PROGRAM_END   = $6271   ; corrected - was $6269 (8 bytes short of the
+    59                                                         ; true end-of-program null terminator; see
+    60                                                         ; include/README.md "Tokenizer fixes")
+    61                          LEFTOVER_ITEMS_START = $6271  ; unused item data (DAGGER, HELMET, etc.)
+    62                          LEFTOVER_ITEMS_END   = $646C  ; kept for historical/future reference
+    63                          ML_ENTRY_STUB_START = $646C   ; hands off build -> BASIC RUN
+    64                                                         ; (trimmed: originally $6500 in the source
+    65                                                         ;  image with 147 bytes of $C7 padding
+    66                                                         ;  before it; nothing hardcodes $6500, so
+    67                                                         ;  the stub now sits right after the
+    68                                                         ;  leftover item data with no gap)
+    69                          
+    70                          ; --- VIC-II / hardware bases referenced by the BASIC program ---
+    71                          VIC_BASE      = $D000  ; "VS" in BASIC source
+    72                          SPRITE_PTRS   = $07F8  ; sprite pointer table (2040-2047 decimal)
+    73                          SCREEN_BASE   = $0400  ; "SC" in BASIC source
+    74                          COLOR_RAM     = $D800  ; "C" in BASIC source
+
+; ******** Source: \src\include\ml_saveload.asm
+    12                          
+    13                                  * = $1220
+    14                          
+    15                          ; --- SYS4640: SAVE game state to tape ---
+    16                          ml_save:
+    17  1220 a901                       lda #$01              ; logical file number 1
+    18  1222 a0ff                       ldy #$FF              ; secondary address (unused by SAVE)
+    19  1224 a201                       ldx #$01              ; device 1 = tape
+    20  1226 20baff                     jsr KERNAL_SETLFS
+    21                          
+    22  1229 a905                       lda #$05               ; filename length = 5 ("DATA1")
+    23  122b a200                       ldx #$00               ; filename pointer low byte
+    24  122d a01c                       ldy #$1C               ; filename pointer high byte -> $1C00 (NAME_BUFFER)
+    25  122f 20bdff                     jsr KERNAL_SETNAM
+    26                          
+    27  1232 a91c                       lda #$1C               ; zp $FC = start address high byte ($1C)
+    28  1234 85fc                       sta $FC
+    29  1236 a900                       lda #$00               ; zp $FB = start address low byte ($00)
+    30  1238 85fb                       sta $FB                ; $FB/$FC now hold start address $1C00 (SAVESTATE_LO)
+    31  123a a020                       ldy #$20               ; end address high byte ($20)
+    32  123c a200                       ldx #$00               ; end address low byte  -> end = $2000 (SAVESTATE_HI)
+    33  123e a9fb                       lda #$FB               ; A = zero-page pointer to start address
+    34  1240 20d8ff                     jsr KERNAL_SAVE
+    35  1243 60                         rts
+    36                          
+    37                          ; --- SYS4676: LOAD game state from tape ---
+    38                          ml_load:
+    39  1244 a901                       lda #$01               ; logical file number 1
+    40  1246 a001                       ldy #$01               ; secondary address 1
+    41  1248 a201                       ldx #$01               ; device 1 = tape
+    42  124a 20baff                     jsr KERNAL_SETLFS
+    43                          
+    44  124d a905                       lda #$05               ; filename length = 5 ("DATA1")
+    45  124f a200                       ldx #$00               ; filename pointer low byte
+    46  1251 a01c                       ldy #$1C               ; filename pointer high byte -> $1C00 (NAME_BUFFER)
+    47  1253 20bdff                     jsr KERNAL_SETNAM
+    48                          
+    49  1256 a900                       lda #$00               ; 0 = load to address stored in the file itself
+    50  1258 a0ff                       ldy #$FF               ; (X/Y ignored since A=0)
+    51  125a a2ff                       ldx #$FF
+    52  125c 20d5ff                     jsr KERNAL_LOAD
+    53  125f 60                         rts
+
+; ******** Source: u:\Programming\c64\assembler\the_dungeons_acme\src\the_dungeons.asm
+
+; ******** Source: \src\include\lookup_table.asm
+     1                          ; ============================================================
+     2                          ; lookup_table.asm
+     3                          ; Unresolved lookup/translation table - ascending byte runs
+     4                          ; separated by padding, structurally table-like but semantic
+     5                          ; purpose not yet decoded (possibly screen-code / sprite-
+     6                          ; pointer / message-index mapping used by the BASIC program).
+     7                          ; Source: decompressed image $1260-$1400.
+     8                          ; NOT YET semantically verified - flagged for further work.
+     9                          ; ============================================================
+    10                          
+    11                                  * = $1260
+    12                          
+    13                          lookup_table:
+    14  1260 006a6b6b6d6c2020...        !binary "/src/include/lookup_table_1260.bin"
+    15                          
+    16                          lookup_table_end:
+
+; ******** Source: u:\Programming\c64\assembler\the_dungeons_acme\src\the_dungeons.asm
+
+; ******** Source: \src\include\charset.asm
+     1                          ; ============================================================
+     2                          ; charset.asm
+     3                          ; Standard C64 character ROM (uppercase/graphics set) copied
+     4                          ; into RAM so the game can display text and PETSCII graphics
+     5                          ; characters while BASIC/KERNAL ROM is banked out.
+     6                          ; Source: decompressed image $1400-$1C00 (2048 bytes = 256 chars).
+     7                          ; Confirmed by rendering (see reference/charset_1400_2000.png).
+     8                          ; ============================================================
+     9                          
+    10                                  * = $1400
+    11                          
+    12                          charset_copy:
+    13  1400 1c224a564c201e00...        !binary "/src/include/charset_1400.bin"
+    14                          
+    15                          charset_copy_end:
+
+; ******** Source: u:\Programming\c64\assembler\the_dungeons_acme\src\the_dungeons.asm
+
+; ******** Source: \src\include\game_state.asm
+     1                          ; ============================================================
+     2                          ; game_state.asm
+     3                          ; Game state working-storage block, INCLUDING the dungeon exit
+     4                          ; matrix. This was previously omitted from the build entirely -
+     5                          ; that's the "no exit doors at Gloomy Entrance" bug: room
+     6                          ; movement checks PEEK(D+R%*4+F%) (BASIC line 161/163), and the
+     7                          ; D array ($1E00 onward) is never written by the BASIC program
+     8                          ; itself, so it MUST be present as static data from load time.
+     9                          ; Leaving this region out meant every direction read as 0 (no
+    10                          ; exit) for every room.
+    11                          ;
+    12                          ; Source: decompressed image $1C00-$2000 (1025 bytes incl. the
+    13                          ; single byte at $2000, which pads right up to basic_program).
+    14                          ;
+    15                          ; Sub-regions within this block (see constants.asm for the
+    16                          ; computed BASIC pointer values):
+    17                          ;   NAME ($1C00, 5 bytes)      - tape filename buffer ("DATA1")
+    18                          ;                                overwritten at runtime by BASIC
+    19                          ;                                lines 176/263 - included here
+    20                          ;                                mainly for completeness/save-
+    21                          ;                                state round-tripping.
+    22                          ;   SR   ($1CA5, ~30 bytes)    - save/restore state pointer block,
+    23                          ;                                written by BASIC line 167/266.
+    24                          ;   MS   ($1CC3, ~100 bytes)   - monster status per room, written
+    25                          ;                                at runtime.
+    26                          ;   T    ($1D27, ~100 bytes)   - trap flags per room, written at
+    27                          ;                                runtime.
+    28                          ;   TR   ($1D8B, 18 bytes)     - target-room scratch array,
+    29                          ;                                zeroed at game start (line ~191).
+    30                          ;   R    ($1D9D, 99 bytes)     - room-connection data, POKEd fresh
+    31                          ;                                from DATA statements every game
+    32                          ;                                start (BASIC line 1064).
+    33                          ;   D    ($1E00, ~512 bytes)   - THE EXIT MATRIX. Never written by
+    34                          ;                                the BASIC program - must be
+    35                          ;                                preserved as static data. This is
+    36                          ;                                the piece that was missing.
+    37                          ;
+    38                          ; Only D strictly needs to be byte-exact from the original image;
+    39                          ; the others are re-initialized by the game itself at startup, but
+    40                          ; are included here unchanged for a faithful, low-risk reconstruction.
+    41                          ; ============================================================
+    42                          
+    43                                  * = SAVESTATE_LO   ; $1C00
+    44                          
+    45                          game_state:
+    46  1c00 44415441318b6308...        !binary "/src/include/game_state_1C00.bin"
+    47                          
+    48                          game_state_end:
+
+; ******** Source: u:\Programming\c64\assembler\the_dungeons_acme\src\the_dungeons.asm
+    39                                  ; FIX: was missing - contains the
+    40                                                                    ; dungeon exit matrix (see file
+    41                                                                    ; header for the bug this caused)
+
+; ******** Source: \src\include\basic_program.asm
+     1                          ; ============================================================
+     2                          ; basic_program.asm
+     3                          ; The full game - 476 lines of tokenized BASIC V2.
+     4                          ; Source: decompressed image $2001-$6271 (corrected boundary -
+     5                          ; the true end-of-program null terminator sits at $626F/$6270,
+     6                          ; not $6269 as originally extracted; see include/README.md).
+     7                          ; Human-readable, corrected detokenized listing:
+     8                          ;   reference/the_dungeons.bas.txt
+     9                          ; Regenerate this binary from that listing with:
+    10                          ;   python3 tools/tokenizer.py  (see tools/README.md)
+    11                          ;
+    12                          ; This is included as a raw binary blob (tokenized form) since
+    13                          ; it's BASIC, not 6502 machine code - ACME just needs to place
+    14                          ; these bytes at the right address for the ML entry stub to
+    15                          ; hand off into.
+    16                          ; ============================================================
+    17                          
+    18                                  * = $2001
+    19                          
+    20                          basic_program:
+    21  2001 2c2001008f204252...        !binary "/src/include/basic_program_2001.bin"
+    22                          
+    23                          basic_program_end:
+
+; ******** Source: u:\Programming\c64\assembler\the_dungeons_acme\src\the_dungeons.asm
+
+; ******** Source: \src\include\leftover_items.asm
+     1                          ; ============================================================
+     2                          ; leftover_items.asm
+     3                          ; Leftover/unused item data - DAGGER, MAGIC AXE, HELMET, and
+     4                          ; other item names + numeric records that do NOT appear
+     5                          ; anywhere in the live 476-line BASIC program. Not reachable
+     6                          ; by any current code path - likely cut content from an
+     7                          ; earlier build of the game.
+     8                          ;
+     9                          ; Kept intentionally (not required for a working build) as
+    10                          ; historical reference and as a possible base for a future
+    11                          ; "restore the cut items" enhancement.
+    12                          ;
+    13                          ; Source: decompressed image $6271-$646C (corrected boundary -
+    14                          ; was $6269, which incorrectly included the last 8 bytes of the
+    15                          ; real BASIC program; harmless in practice since both files were
+    16                          ; extracted from the same source image with no gap between them,
+    17                          ; but now labeled correctly - see include/README.md).
+    18                          ; ============================================================
+    19                          
+    20                                  * = LEFTOVER_ITEMS_START   ; $6271
+    21                          
+    22                          leftover_items:
+    23  6271 2c302c36362c3632...        !binary "/src/include/leftover_items_6271.bin"
+    24                          
+    25                          leftover_items_end:
+
+; ******** Source: u:\Programming\c64\assembler\the_dungeons_acme\src\the_dungeons.asm
+    43                              ; kept for reference, see README
+
+; ******** Source: \src\include\ml_entry.asm
+     1                          ; ============================================================
+     2                          ; ml_entry.asm
+     3                          ; Final step of the build: points BASIC's TXTTAB at the game
+     4                          ; program ($2001) and hands off into BASIC's own relink/CLR/RUN
+     5                          ; logic. This is the true "game start" moment.
+     6                          ;
+     7                          ; TRIMMED (Tier 2): originally sat at $6500 in the source image,
+     8                          ; with 147 bytes of $C7 padding between it and the end of the
+     9                          ; leftover-item data at $646C. Nothing in the BASIC program
+    10                          ; hardcodes $6500 - only this project's own autorun stub points
+    11                          ; at it - so the stub is relocated to $646C with no gap. If you
+    12                          ; add the padding/leftover-item region back in for a byte-exact
+    13                          ; rebuild, this still works unchanged; it just leaves the old
+    14                          ; $C7 filler unused rather than depending on it.
+    15                          ;
+    16                          ; Requires real BASIC ROM to run (JSR/JMP targets are ROM).
+    17                          ; ============================================================
+    18                          
+
+; ******** Source: \src\include\constants.asm
+     1                          ; ============================================================
+     2                          ; constants.asm
+     3                          ; The Dungeons (Brian & Marian Clark, 1983) - reconstruction
+     4                          ; Confirmed labels/addresses from decompressed-image analysis
+     5                          ; ============================================================
+     6                          
+     7                          ; --- BASIC zero page (used by the ML entry stub at $6500) ---
+     8                          TXTTAB_LO   = $2B      ; start-of-BASIC-program pointer, low byte
+     9                          TXTTAB_HI   = $2C      ; start-of-BASIC-program pointer, high byte
+    10                          VARTAB_LO   = $2D      ; start-of-variables pointer, low byte
+    11                          VARTAB_HI   = $2E      ; start-of-variables pointer, high byte
+    12                          ARYTAB_LO   = $2F      ; start-of-arrays pointer, low byte
+    13                          ARYTAB_HI   = $30      ; start-of-arrays pointer, high byte
+    14                          STREND_LO   = $31      ; end-of-arrays/string-storage pointer, low byte
+    15                          STREND_HI   = $32      ; end-of-arrays/string-storage pointer, high byte
+    16                          
+    17                          ; --- BASIC ROM entry points used by the ML entry stub ---
+    18                          ; (Standard C64 BASIC V2 ROM addresses - real ROM required to run)
+    19                          BASIC_LINKPRG = $A660  ; relink BASIC program line pointers
+    20                          BASIC_CLR     = $A68E  ; clear variables / reset stack (CLR-equivalent)
+    21                          BASIC_MAIN    = $A7AE  ; main statement-execution dispatcher (GONE/warm start)
+    22                          
+    23                          ; --- KERNAL vectors used by the save/load routine ($1218-$125F) ---
+    24                          KERNAL_SETLFS = $FFBA
+    25                          KERNAL_SETNAM = $FFBD
+    26                          KERNAL_LOAD   = $FFD5
+    27                          KERNAL_SAVE   = $FFD8
+    28                          
+    29                          ; --- Save-state block used by SYS4640 (save) / SYS4676 (load) ---
+    30                          ; Filename buffer + save-state block, built by BASIC lines 710-712 / 1140-1142
+    31                          NAME_BUFFER   = $1C00  ; "DATA1" filename text lives here (5 bytes)
+    32                          SAVESTATE_LO  = $1C00  ; save/load range low byte
+    33                          SAVESTATE_HI  = $2000  ; save/load range high byte (exclusive)
+    34                          
+    35                          ; --- Game-state sub-arrays within the save-state block ---
+    36                          ; Computed at runtime by BASIC line 243: D=30*256:R=D-99:TR=R-18:Q=18:T=TR-100:MS=T-100
+    37                          ; SR computed by line 167/266: SR=MS-30
+    38                          SR_PTR        = $1CA5  ; save/restore pointer block (~30 bytes)
+    39                          MS_ARRAY      = $1CC3  ; monster status per room (~100 bytes)
+    40                          T_ARRAY       = $1D27  ; trap flags per room (~100 bytes)
+    41                          TR_ARRAY      = $1D8B  ; target-room scratch (18 bytes), zeroed at game start
+    42                          R_ARRAY       = $1D9D  ; room-connection data (99 bytes), re-read from DATA
+    43                                                  ; statements every game start (BASIC line 1064) -
+    44                                                  ; does NOT need to be byte-exact in the image.
+    45                          D_ARRAY       = $1E00  ; THE DUNGEON EXIT MATRIX. Indexed as
+    46                                                  ; PEEK(D+room*4+direction) - BASIC lines 161/163.
+    47                                                  ; Never written by the BASIC program itself, so
+    48                                                  ; MUST be present as static data at load time.
+    49                          
+    50                          ; --- Game entry / layout (decompressed image addresses) ---
+    51                          SPRITE_POOL_START   = $0840   ; 36 sprite blocks (#33-68), 64 bytes each
+    52                          SPRITE_POOL_END     = $1140
+    53                          WALL_TILES_START    = $1140   ; custom wall/gate tile bitmaps
+    54                          ML_SAVELOAD_START   = $1218   ; tape SAVE/LOAD subroutines
+    55                          LOOKUP_TABLE_START  = $1260   ; unresolved lookup/translation table
+    56                          CHARSET_COPY_START  = $1400   ; standard C64 charset copied to RAM
+    57                          BASIC_PROGRAM_START = $2001   ; main game program (476 lines)
+    58                          BASIC_PROGRAM_END   = $6271   ; corrected - was $6269 (8 bytes short of the
+    59                                                         ; true end-of-program null terminator; see
+    60                                                         ; include/README.md "Tokenizer fixes")
+    61                          LEFTOVER_ITEMS_START = $6271  ; unused item data (DAGGER, HELMET, etc.)
+    62                          LEFTOVER_ITEMS_END   = $646C  ; kept for historical/future reference
+    63                          ML_ENTRY_STUB_START = $646C   ; hands off build -> BASIC RUN
+    64                                                         ; (trimmed: originally $6500 in the source
+    65                                                         ;  image with 147 bytes of $C7 padding
+    66                                                         ;  before it; nothing hardcodes $6500, so
+    67                                                         ;  the stub now sits right after the
+    68                                                         ;  leftover item data with no gap)
+    69                          
+    70                          ; --- VIC-II / hardware bases referenced by the BASIC program ---
+    71                          VIC_BASE      = $D000  ; "VS" in BASIC source
+    72                          SPRITE_PTRS   = $07F8  ; sprite pointer table (2040-2047 decimal)
+    73                          SCREEN_BASE   = $0400  ; "SC" in BASIC source
+    74                          COLOR_RAM     = $D800  ; "C" in BASIC source
+
+; ******** Source: \src\include\ml_entry.asm
+    20                          
+    21                                  * = ML_ENTRY_STUB_START   ; $646C (see constants.asm)
+    22                          
+    23                          ; ml_entry is 33 bytes ($646C-$648C); VARSTART just needs to sit
+    24                          ; at or after $648D. $6490 leaves a little headroom.
+    25                          VARSTART = $6490
+    26                          
+    27                          ml_entry:
+    28  646c a201                       ldx #$01
+    29  646e 862b                       stx TXTTAB_LO           ; TXTTAB = $2001 (start of BASIC program)
+    30  6470 a220                       ldx #$20
+    31  6472 862c                       stx TXTTAB_HI
+    32                          
+    33  6474 a200                       ldx #$00
+    34  6476 862d                       stx VARTAB_LO
+    35  6478 862f                       stx ARYTAB_LO
+    36  647a 8631                       stx STREND_LO
+    37                          
+    38  647c a264                       ldx #>VARSTART
+    39  647e 862e                       stx VARTAB_HI            ; VARTAB = ARYTAB = STREND = VARSTART
+    40  6480 8630                       stx ARYTAB_HI            ; (variables/arrays start right after
+    41  6482 8632                       stx STREND_HI            ;  this stub)
+    42                          
+    43  6484 2060a6                     jsr BASIC_LINKPRG        ; relink BASIC program line pointers
+    44  6487 208ea6                     jsr BASIC_CLR            ; clear variables / reset BASIC stack
+    45  648a 4caea7                     jmp BASIC_MAIN           ; enter BASIC's main statement dispatcher
+    46                                                            ; -> starts executing the game at $2001
+    47                          ml_entry_end:
+
+; ******** Source: u:\Programming\c64\assembler\the_dungeons_acme\src\the_dungeons.asm
+    44                                    ; now immediately follows,
+    45                                                                    ; no $C7 padding gap

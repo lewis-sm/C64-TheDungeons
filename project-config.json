@@ -1,0 +1,16 @@
+{
+    "name": "the_dungeons_acme",
+    "description": "Project the_dungeons_acme",
+    "toolkit": "acme",
+    "sources": [
+        "src/the_dungeons.asm",
+        "src/include/data_tables.inc",
+        "src/resources/Sprites.spr"
+    ],
+    "build": "debug",
+    "definitions": [],
+    "includes": ["src/includes"],
+    "args": [],
+    "compiler": "",
+    "machine": "c64"
+}

@@ -1,0 +1,38 @@
+################################################################################
+# BUILD FILE
+# generated file: DO NOT EDIT!
+################################################################################
+
+ninja_required_version = 1.3
+toolkit = acme
+machine = c64
+format = prg
+basedir = u$:\Programming\c64\assembler\the_dungeons_acme
+builddir = u$:\Programming\c64\assembler\the_dungeons_acme\build
+
+project = the_dungeons_acme
+config = u$:\Programming\c64\assembler\the_dungeons_acme\project-config.json
+target = u$:\Programming\c64\assembler\the_dungeons_acme\build\the_dungeons_acme.prg
+dbg_out = u$:\Programming\c64\assembler\the_dungeons_acme\build\the_dungeons_acme.report
+python_exe = c$:\Users\seanl\.vscode\extensions\rosc.vs64-2.7.3\resources\python\python.exe
+java_exe = C$:\Users\seanl\AppData\Local\Programs\VS64DevTools\jre\bin\java.exe
+rc_exe = c$:\Users\seanl\.vscode\extensions\rosc.vs64-2.7.3\tools\rc.py
+rc_flags = --format acme --config "$config"
+build_flags = 
+asm_exe = U$:\Programming\c64\assembler\ACME\acme.exe
+
+flags = --msvc --maxerrors 99 -DDEBUG=1 -f cbm
+includes = -I u$:\Programming\c64\assembler\the_dungeons_acme -I u$:\Programming\c64\assembler\the_dungeons_acme\src\includes -I u$:\Programming\c64\assembler\the_dungeons_acme\build
+
+rule res
+    command = $python_exe $rc_exe $rc_flags -o $out $in
+
+rule asm
+    depfile = $out.d
+    deps = gcc
+    command = $asm_exe $flags $includes -r "$dbg_out" -o $out $in
+
+build $target | $dbg_out : asm u$:\Programming\c64\assembler\the_dungeons_acme\src\the_dungeons.asm
+
+build all: phony $target
+default all
